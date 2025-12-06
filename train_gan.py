@@ -1,4 +1,4 @@
-# train_gan.py (チューニング対応版)
+# train_gan.py (両側ラベルスムージング対応版)
 
 import torch
 import torch.nn as nn
@@ -12,27 +12,26 @@ import torch.nn.functional as F
 from models import Generator, Discriminator
 from data_preprocessing import prepare_data_loaders
 
-# --- 1. 設定とハイパーパラメータ (チューニング用) ---
+# --- 1. 設定とハイパーパラメータ ---
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"使用デバイス: {device}")
 
-# ★★★ ここをいじって実験してください ★★★
+# ★★★ チューニング設定 ★★★
 # ---------------------------------------------
 BATCH_SIZE = 64
 NUM_EPOCHS = 50 
 
-# 学習率 (TTUR: Two-Time-Scale Update Rule)
-# DをGより少し遅くしたり、逆に速くしたりして調整
+# 学習率 (TTUR)
 LR_D = 0.0002 
 LR_G = 0.0002 
 
-# K-step: Dを何回更新してからGを1回更新するか
-# (Dが弱すぎる場合はここを増やす: 3 や 5 など)
-K_STEPS = 3 
+# K-step (Dの更新回数)
+K_STEPS = 3
 
-# ラベルスムージング (Dの過信を防ぐ)
-# 1.0 ではなく 0.9 や 0.8 にする
-LABEL_SMOOTH_VAL = 0.9
+# ★ 両側ラベルスムージング (Two-sided Label Smoothing) ★
+# Dの過信を防ぐため、0.0 / 1.0 ではなく、少し緩めた値を使う
+LABEL_REAL = 0.9  # 本物の正解ラベル (通常 1.0 -> 0.9)
+LABEL_FAKE = 0.1  # 偽物の正解ラベル (通常 0.0 -> 0.1)
 # ---------------------------------------------
 
 # 辞書とデータのロード
@@ -66,7 +65,6 @@ generator = Generator(VOCAB_SIZE, HIDDEN_DIM, NOISE_DIM, NUM_CLASSES, MAX_SEQUEN
 discriminator = Discriminator(VOCAB_SIZE, EMBEDDING_DIM, HIDDEN_DIM, NUM_CLASSES).to(device)
 
 # --- 4. 最適化アルゴリズムと損失関数 ---
-# 学習率を個別に設定
 optimizer_g = optim.Adam(generator.parameters(), lr=LR_G, betas=(0.5, 0.999))
 optimizer_d = optim.Adam(discriminator.parameters(), lr=LR_D, betas=(0.5, 0.999))
 
@@ -74,7 +72,8 @@ adversarial_loss = nn.BCEWithLogitsLoss() # 本物か偽物か
 auxiliary_loss = nn.CrossEntropyLoss()    # どのクラスか
 
 # --- 5. 学習ループ ---
-print(f"\n--- AC-GAN 学習開始 (K_STEPS={K_STEPS}, Smooth={LABEL_SMOOTH_VAL}) ---")
+print(f"\n--- AC-GAN 学習開始 ---")
+print(f"設定: K_STEPS={K_STEPS}, Real={LABEL_REAL}, Fake={LABEL_FAKE}")
 
 for epoch in range(NUM_EPOCHS):
     for i, (real_seqs, real_labels) in enumerate(train_loader):
@@ -83,21 +82,13 @@ for epoch in range(NUM_EPOCHS):
         real_seqs = real_seqs.to(device)
         real_labels = real_labels.to(device)
 
-        # 正解ラベル (Label Smoothing 適用)
-        valid = torch.full((batch_size, 1), LABEL_SMOOTH_VAL, device=device)
-        fake = torch.full((batch_size, 1), 0.0, device=device)
+        # ★ ラベル定義（両側スムージング適用）★
+        valid = torch.full((batch_size, 1), LABEL_REAL, device=device) # 例: 0.9
+        fake = torch.full((batch_size, 1), LABEL_FAKE, device=device)  # 例: 0.1
 
         # ===============================================
-        #  Train Discriminator (K_STEPS 回繰り返す)
+        #  Train Discriminator
         # ===============================================
-        # Dを強くすることで、Gに「より良い偽物」を作らせ、
-        # かつD自身の分類能力も向上させる狙い
-        
-        # このバッチでのDの学習ループ (通常は1回だが、K_STEPS回更新するロジックにするため
-        # 厳密には「同じバッチでDを回す」か「Dだけデータローダーを進める」かだが、
-        # 実装を簡単にするため、ここでは「Gの更新をスキップする」方式で実装する)
-        
-        # 常にDは更新する
         optimizer_d.zero_grad()
 
         # 1. 本物のデータを判定
@@ -110,15 +101,14 @@ for epoch in range(NUM_EPOCHS):
         z = torch.randn(batch_size, MAX_SEQUENCE_LENGTH, NOISE_DIM).to(device)
         gen_labels = torch.randint(0, NUM_CLASSES, (batch_size,), device=device)
         
-        # Gは勾配計算不要(detach)で生成
+        # D学習用なので離散化(argmax)する
         fake_logits = generator(z, gen_labels)
         fake_seqs_discrete = torch.argmax(fake_logits, dim=2)
         
         pred_validity_fake, pred_class_fake = discriminator(fake_seqs_discrete.detach())
         
+        # 偽物に対する損失
         d_loss_fake_val = adversarial_loss(pred_validity_fake, fake)
-        # AC-GANの論文によっては偽物のクラス分類誤差もDに入れる場合があるが、
-        # 偽物のラベルは信頼できないためValidityのみでDを鍛えるのが一般的
         d_loss_fake = d_loss_fake_val 
 
         d_loss = (d_loss_real + d_loss_fake) / 2
@@ -126,19 +116,16 @@ for epoch in range(NUM_EPOCHS):
         optimizer_d.step()
 
         # ===============================================
-        #  Train Generator (K_STEPS回に1回だけ更新)
+        #  Train Generator (K_STEPS回に1回)
         # ===============================================
-        g_loss_val = 0.0 # ログ表示用初期化
+        g_loss_val = 0.0
 
-        # バッチ回数(i)が K_STEPS で割り切れるときだけGを更新
         if i % K_STEPS == 0:
             optimizer_g.zero_grad()
 
-            # もう一度ノイズから生成 (Gに勾配を通すため再計算)
-            # ※メモリ節約のため上記と同じzを使う手もあるが、新たに生成した方が安全
+            # 再生成 (勾配用)
             z = torch.randn(batch_size, MAX_SEQUENCE_LENGTH, NOISE_DIM).to(device)
             gen_labels = torch.randint(0, NUM_CLASSES, (batch_size,), device=device)
-            
             fake_logits = generator(z, gen_labels)
             
             # ソフトな埋め込み
@@ -148,8 +135,8 @@ for epoch in range(NUM_EPOCHS):
             
             pred_validity, pred_class = discriminator(None, soft_input=soft_input)
 
-            # Gの損失: 騙したい(1.0) + 指定クラスに分類させたい
-            # Gに対しては Label Smoothing は使わず、純粋に「1.0」を目指させる
+            # Gの目標: Dを完全に騙したいので、ここではスムージングせず「1.0」を目指すのが一般的
+            # (ただし LABEL_REAL を目指す設定もあり得るが、強い勾配を得るため 1.0 推奨)
             valid_target = torch.full((batch_size, 1), 1.0, device=device)
             
             g_loss_validity = adversarial_loss(pred_validity, valid_target)
@@ -161,14 +148,13 @@ for epoch in range(NUM_EPOCHS):
             
             g_loss_val = g_loss.item()
 
-        # ログ表示 (Gが更新された時だけ詳細を出す、あるいはDの値だけ更新し続ける)
         if i % 100 == 0:
             print(
                 f"[Epoch {epoch+1}/{NUM_EPOCHS}] [Batch {i}/{len(train_loader)}] "
                 f"[D loss: {d_loss.item():.4f}] [G loss: {g_loss_val:.4f}]"
             )
 
-    # --- エポックごとの生成サンプル確認 ---
+    # --- 生成サンプル確認 ---
     print(f"--- Epoch {epoch+1} ---")
     
 # --- 保存 ---
