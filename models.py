@@ -1,21 +1,19 @@
-# models.py (AC-GAN用)
+# models.py (CNN-Discriminator 版)
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.nn.utils as utils
 
-# --- 1. ジェネレータ (偽造職人) ---
+# --- 1. ジェネレータ (LSTMのまま) ---
 class Generator(nn.Module):
     def __init__(self, vocab_size, hidden_dim, noise_dim, num_classes, seq_length):
         super(Generator, self).__init__()
         self.seq_length = seq_length
         self.hidden_dim = hidden_dim
         
-        # クラスラベルを埋め込む層 (ラベル -> ベクトル)
         self.label_embedding = nn.Embedding(num_classes, noise_dim)
         
-        # LSTMへの入力層 (ノイズ + ラベル情報)
-        # ノイズとラベルを足し合わせるか結合するかは手法によるが、ここでは結合して入力次元を2倍にする
         self.lstm = nn.LSTM(
             input_size=noise_dim * 2, 
             hidden_size=hidden_dim,
@@ -23,73 +21,65 @@ class Generator(nn.Module):
             batch_first=True,
             dropout=0.2
         )
-        
-        # 出力層 (各タイムステップで次のAPIを予測)
         self.fc = nn.Linear(hidden_dim, vocab_size)
 
     def forward(self, noise, labels):
-        # noise: (Batch, SeqLen, NoiseDim) - 実際にはSeqLen=1で入力してループさせるのが一般的だが、
-        # ここでは簡易化のため、SeqLen分のノイズを一気に入力する方式をとる
-        
-        # labels: (Batch) -> (Batch, NoiseDim)
         label_emb = self.label_embedding(labels)
-        
-        # シーケンス長に合わせてラベル情報を複製
-        # (Batch, NoiseDim) -> (Batch, SeqLen, NoiseDim)
         label_emb = label_emb.unsqueeze(1).repeat(1, self.seq_length, 1)
-        
-        # ノイズとラベルを結合
-        # (Batch, SeqLen, NoiseDim * 2)
         combined_input = torch.cat([noise, label_emb], dim=2)
-        
         lstm_out, _ = self.lstm(combined_input)
-        
-        # ロジット(確率の元)を出力
-        # (Batch, SeqLen, VocabSize)
         logits = self.fc(lstm_out)
         return logits
 
-# --- 2. ディスクリミネータ (鑑定士 + 分類器) ---
+# --- 2. ディスクリミネータ (CNNに進化！) ---
 class Discriminator(nn.Module):
     def __init__(self, vocab_size, embedding_dim, hidden_dim, num_classes):
         super(Discriminator, self).__init__()
         
-        # スペクトル正規化を使用 (学習安定化のため)
         self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=0)
         
-        self.lstm = nn.LSTM(
-            input_size=embedding_dim,
-            hidden_size=hidden_dim,
-            num_layers=2,
-            batch_first=True,
-            bidirectional=True,
-            dropout=0.2
-        )
+        # 1次元畳み込み層 (3種類のウィンドウサイズ)
+        # フィルタ数(out_channels)を多めに設定
+        self.conv1 = nn.Conv1d(in_channels=embedding_dim, out_channels=128, kernel_size=3)
+        self.conv2 = nn.Conv1d(in_channels=embedding_dim, out_channels=128, kernel_size=4)
+        self.conv3 = nn.Conv1d(in_channels=embedding_dim, out_channels=128, kernel_size=5)
         
-        # 最終層の特徴量サイズ (Bidirectionalなので2倍)
-        feature_dim = hidden_dim * 2
+        self.dropout = nn.Dropout(0.5)
         
-        # --- 出力層 A: 本物か偽物か (Validity) ---
+        # 特徴量結合後の次元: 128 * 3 = 384
+        feature_dim = 128 * 3
+        
+        # --- AC-GAN用の2つの出力層 ---
+        # スペクトル正規化を入れて学習を安定させる
         self.fc_validity = utils.spectral_norm(nn.Linear(feature_dim, 1))
-        
-        # --- 出力層 B: どのクラスか (Class Classification) ---
         self.fc_class = utils.spectral_norm(nn.Linear(feature_dim, num_classes))
 
     def forward(self, sequence, soft_input=None):
-        # GANの学習のために、ソフトな入力(Generator由来)とハードな入力(本物由来)の両方に対応
+        # Generatorからのソフト入力に対応
         if soft_input is not None:
-            embedded = soft_input
+            x = soft_input
         else:
-            embedded = self.embedding(sequence)
+            x = self.embedding(sequence)
         
-        # LSTM処理
-        lstm_out, _ = self.lstm(embedded)
+        # (Batch, SeqLen, EmbDim) -> (Batch, EmbDim, SeqLen)
+        x = x.permute(0, 2, 1)
         
-        # 最後のタイムステップの隠れ状態を取得
-        last_hidden_state = lstm_out[:, -1, :]
+        # CNN + ReLU + MaxPool
+        c1 = F.relu(self.conv1(x))
+        c2 = F.relu(self.conv2(x))
+        c3 = F.relu(self.conv3(x))
         
-        # 2つの判定を行う
-        validity = self.fc_validity(last_hidden_state) # Real(1) or Fake(0)
-        class_logits = self.fc_class(last_hidden_state) # Class 0~7
+        # Global Max Pooling
+        p1 = F.max_pool1d(c1, c1.shape[2]).squeeze(2)
+        p2 = F.max_pool1d(c2, c2.shape[2]).squeeze(2)
+        p3 = F.max_pool1d(c3, c3.shape[2]).squeeze(2)
+        
+        # 特徴ベクトル結合
+        features = torch.cat([p1, p2, p3], dim=1)
+        features = self.dropout(features)
+        
+        # 2つの判定結果を出力
+        validity = self.fc_validity(features)
+        class_logits = self.fc_class(features)
         
         return validity, class_logits
