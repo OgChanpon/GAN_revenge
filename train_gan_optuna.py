@@ -1,4 +1,4 @@
-# train_gan_optuna.py (G-step追加版)
+# train_gan_optuna.py (BERT-AC-GAN 最適化版)
 
 import torch
 import torch.nn as nn
@@ -11,15 +11,15 @@ import optuna
 from optuna.trial import TrialState
 
 # 必要なモジュール
-from models import Generator, Discriminator, SEBlock # CNN版を使うのでSEBlockも必要ならimport
+from models import Generator, Discriminator
 from data_preprocessing import prepare_data_loaders
 
 # --- 設定 ---
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-BATCH_SIZE = 64
+BATCH_SIZE = 32  # Transformerはメモリ消費が大きいので安全策で32
 MAX_SEQUENCE_LENGTH = 1000
-N_TRIALS = 50       # 試行回数
-EPOCHS_PER_TRIAL = 20 
+N_TRIALS = 50       
+EPOCHS_PER_TRIAL = 15 # Transformerは学習が遅いので少し減らす
 
 # 辞書ロード
 with open("word_to_int.pkl", "rb") as f:
@@ -30,7 +30,7 @@ with open("category_to_id.pkl", "rb") as f:
     category_to_id = pickle.load(f)
 NUM_CLASSES = len(category_to_id)
 
-# テストデータ (評価用)
+# テストデータ
 with open("test_dataset.pkl", "rb") as f:
     test_data = pickle.load(f)
 
@@ -59,22 +59,29 @@ def evaluate_model(model):
 # --- 目的関数 ---
 def objective(trial):
     # ==========================
-    # 1. パラメータの探索空間定義
+    # 1. パラメータの探索空間 (Transformer仕様)
     # ==========================
     
     # モデル構造
-    embedding_dim = trial.suggest_categorical("embedding_dim", [64, 128, 256, 512, 1024]) # 64は除外して大きめで勝負
-    hidden_dim = trial.suggest_categorical("hidden_dim", [64, 128, 256, 512, 1024])       # CNNフィルタ数
+    # d_model (hidden_dim) は nhead で割り切れる必要がある
+    # [128, 256, 512] はすべて 2, 4, 8 で割り切れるので安全
+    hidden_dim = trial.suggest_categorical("hidden_dim", [128, 256, 512]) 
+    embedding_dim = hidden_dim # TransformerではEmbed=Hiddenにするのが定石
+    
+    nhead = trial.suggest_categorical("nhead", [2, 4, 8])
+    num_layers = trial.suggest_int("num_layers", 2, 4) # 深すぎるとGANは学習しにくい
+    dropout = trial.suggest_float("dropout", 0.1, 0.3)
+    
     noise_dim = 100
     
-    # 学習率
-    lr_d = trial.suggest_float("lr_d", 1e-5, 1e-3, log=True)
-    g_lr_ratio = trial.suggest_float("g_lr_ratio", 0.1, 1.5) # 範囲を少し広げる
+    # 学習率 (Transformerは少し低めが良い傾向)
+    lr_d = trial.suggest_float("lr_d", 5e-5, 5e-4, log=True)
+    g_lr_ratio = trial.suggest_float("g_lr_ratio", 0.1, 1.2)
     lr_g = lr_d * g_lr_ratio
     
-    # 更新回数のバランス
-    k_steps = trial.suggest_int("k_steps", 1, 5) # Dを何回更新したらGの番になるか
-    g_steps = trial.suggest_int("g_steps", 1, 5) # ★追加: Gの番が来たら何回連続で更新するか
+    # 更新回数
+    k_steps = trial.suggest_int("k_steps", 1, 3)
+    g_steps = trial.suggest_int("g_steps", 1, 3)
     
     # ラベルスムージング
     label_real = trial.suggest_float("label_real", 0.85, 1.0)
@@ -84,7 +91,17 @@ def objective(trial):
     # 2. モデル構築
     # ==========================
     generator = Generator(VOCAB_SIZE, hidden_dim, noise_dim, NUM_CLASSES, MAX_SEQUENCE_LENGTH).to(device)
-    discriminator = Discriminator(VOCAB_SIZE, embedding_dim, hidden_dim, NUM_CLASSES).to(device)
+    
+    # DiscriminatorにOptunaのパラメータを渡す
+    discriminator = Discriminator(
+        vocab_size=VOCAB_SIZE, 
+        embedding_dim=embedding_dim, 
+        hidden_dim=hidden_dim, 
+        num_classes=NUM_CLASSES,
+        nhead=nhead,
+        num_layers=num_layers,
+        dropout=dropout
+    ).to(device)
     
     optimizer_g = optim.Adam(generator.parameters(), lr=lr_g, betas=(0.5, 0.999))
     optimizer_d = optim.Adam(discriminator.parameters(), lr=lr_d, betas=(0.5, 0.999))
@@ -107,16 +124,12 @@ def objective(trial):
             valid = torch.full((batch_len, 1), label_real, device=device)
             fake = torch.full((batch_len, 1), label_fake, device=device)
             
-            # ---------------------
-            #  Train Discriminator
-            # ---------------------
+            # --- Train D ---
             optimizer_d.zero_grad()
             
-            # Real
             pred_validity, pred_class = discriminator(real_seqs)
             d_loss_real = adversarial_loss(pred_validity, valid) + auxiliary_loss(pred_class, real_labels)
             
-            # Fake
             z = torch.randn(batch_len, MAX_SEQUENCE_LENGTH, noise_dim).to(device)
             gen_labels = torch.randint(0, NUM_CLASSES, (batch_len,), device=device)
             fake_seqs = torch.argmax(generator(z, gen_labels), dim=2)
@@ -128,28 +141,21 @@ def objective(trial):
             d_loss.backward()
             optimizer_d.step()
             
-            # ---------------------
-            #  Train Generator (K回に1回、まとめてG回更新)
-            # ---------------------
+            # --- Train G ---
             if i % k_steps == 0:
-                for _ in range(g_steps): # ★ここがポイント: Gを連続更新
+                for _ in range(g_steps):
                     optimizer_g.zero_grad()
-                    
-                    # 毎回新しいノイズで生成する
                     z = torch.randn(batch_len, MAX_SEQUENCE_LENGTH, noise_dim).to(device)
                     gen_labels = torch.randint(0, NUM_CLASSES, (batch_len,), device=device)
                     
-                    # Soft Embedding Trick
                     fake_logits = generator(z, gen_labels)
                     fake_probs = F.softmax(fake_logits, dim=2)
                     soft_input = torch.matmul(fake_probs, discriminator.embedding.weight)
                     
                     pred_validity, pred_class = discriminator(None, soft_input=soft_input)
                     
-                    # Gの目標: Dを騙す(1.0)
                     valid_target = torch.full((batch_len, 1), 1.0, device=device)
                     g_loss = adversarial_loss(pred_validity, valid_target) + auxiliary_loss(pred_class, gen_labels)
-                    
                     g_loss.backward()
                     optimizer_g.step()
 
@@ -162,7 +168,7 @@ def objective(trial):
     return accuracy
 
 if __name__ == "__main__":
-    print(f"Optunaによる最適化を開始します (試行回数: {N_TRIALS})")
+    print(f"OptunaによるBERT-AC-GAN最適化を開始します (試行回数: {N_TRIALS})")
     study = optuna.create_study(direction="maximize", pruner=optuna.pruners.MedianPruner())
     study.optimize(objective, n_trials=N_TRIALS)
     
@@ -172,5 +178,5 @@ if __name__ == "__main__":
     for key, value in study.best_params.items():
         print(f"  {key}: {value}")
     
-    study.trials_dataframe().to_csv("optuna_results.csv")
-    print("結果を optuna_results.csv に保存しました。")
+    study.trials_dataframe().to_csv("optuna_results_bert.csv")
+    print("結果を optuna_results_bert.csv に保存しました。")
