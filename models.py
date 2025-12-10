@@ -1,11 +1,9 @@
-# models.py (CNN-Discriminator 版)
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.utils as utils
 
-# --- 1. ジェネレータ (LSTMのまま) ---
+# --- 1. ジェネレータ (LSTM) ---
 class Generator(nn.Module):
     def __init__(self, vocab_size, hidden_dim, noise_dim, num_classes, seq_length):
         super(Generator, self).__init__()
@@ -31,26 +29,50 @@ class Generator(nn.Module):
         logits = self.fc(lstm_out)
         return logits
 
-# --- 2. ディスクリミネータ (CNNに進化！) ---
+# --- 2. SE-Block (アテンション機構) ---
+class SEBlock(nn.Module):
+    def __init__(self, channel, reduction=16):
+        super(SEBlock, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool1d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channel, channel // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channel // reduction, channel, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        b, c, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1)
+        return x * y.expand_as(x)
+
+# --- 3. ディスクリミネータ (CNN + SE-Block + Optuna対応) ---
 class Discriminator(nn.Module):
     def __init__(self, vocab_size, embedding_dim, hidden_dim, num_classes):
         super(Discriminator, self).__init__()
         
         self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=0)
         
-        # 1次元畳み込み層 (3種類のウィンドウサイズ)
-        # フィルタ数(out_channels)を多めに設定
-        self.conv1 = nn.Conv1d(in_channels=embedding_dim, out_channels=128, kernel_size=3)
-        self.conv2 = nn.Conv1d(in_channels=embedding_dim, out_channels=128, kernel_size=4)
-        self.conv3 = nn.Conv1d(in_channels=embedding_dim, out_channels=128, kernel_size=5)
+        # Optunaの 'hidden_dim' を CNNのフィルタ数として利用する
+        num_filters = hidden_dim 
+        
+        # 1次元畳み込み層
+        self.conv1 = nn.Conv1d(in_channels=embedding_dim, out_channels=num_filters, kernel_size=3)
+        self.conv2 = nn.Conv1d(in_channels=embedding_dim, out_channels=num_filters, kernel_size=4)
+        self.conv3 = nn.Conv1d(in_channels=embedding_dim, out_channels=num_filters, kernel_size=5)
+        
+        # SE-Block
+        self.se1 = SEBlock(num_filters)
+        self.se2 = SEBlock(num_filters)
+        self.se3 = SEBlock(num_filters)
         
         self.dropout = nn.Dropout(0.5)
         
-        # 特徴量結合後の次元: 128 * 3 = 384
-        feature_dim = 128 * 3
+        # 特徴量結合後の次元 (3つのフィルタの合計)
+        feature_dim = num_filters * 3
         
-        # --- AC-GAN用の2つの出力層 ---
-        # スペクトル正規化を入れて学習を安定させる
+        # 出力層 (スペクトル正規化付き)
         self.fc_validity = utils.spectral_norm(nn.Linear(feature_dim, 1))
         self.fc_class = utils.spectral_norm(nn.Linear(feature_dim, num_classes))
 
@@ -64,21 +86,25 @@ class Discriminator(nn.Module):
         # (Batch, SeqLen, EmbDim) -> (Batch, EmbDim, SeqLen)
         x = x.permute(0, 2, 1)
         
-        # CNN + ReLU + MaxPool
+        # Path 1
         c1 = F.relu(self.conv1(x))
-        c2 = F.relu(self.conv2(x))
-        c3 = F.relu(self.conv3(x))
-        
-        # Global Max Pooling
+        c1 = self.se1(c1)
         p1 = F.max_pool1d(c1, c1.shape[2]).squeeze(2)
+        
+        # Path 2
+        c2 = F.relu(self.conv2(x))
+        c2 = self.se2(c2)
         p2 = F.max_pool1d(c2, c2.shape[2]).squeeze(2)
+        
+        # Path 3
+        c3 = F.relu(self.conv3(x))
+        c3 = self.se3(c3)
         p3 = F.max_pool1d(c3, c3.shape[2]).squeeze(2)
         
-        # 特徴ベクトル結合
+        # 結合
         features = torch.cat([p1, p2, p3], dim=1)
         features = self.dropout(features)
         
-        # 2つの判定結果を出力
         validity = self.fc_validity(features)
         class_logits = self.fc_class(features)
         

@@ -14,11 +14,12 @@ from models import Discriminator
 # --- 設定 ---
 WORD_TO_INT_PATH = 'word_to_int.pkl'
 CATEGORY_TO_ID_PATH = 'category_to_id.pkl'
-MODEL_PATH = 'acgan_discriminator.pth'
+#MODEL_PATH = 'acgan_discriminator.pth'
+MODEL_PATH = 'acgan_discriminator_focal.pth'
 TEST_DATA_PATH = 'test_dataset.pkl'
 
-EMBEDDING_DIM = 128
-HIDDEN_DIM = 256
+EMBEDDING_DIM = 1024
+HIDDEN_DIM = 512
 # AC-GANのDiscriminatorはnum_classesが必要
 with open(CATEGORY_TO_ID_PATH, 'rb') as f:
     cat_to_id = pickle.load(f)

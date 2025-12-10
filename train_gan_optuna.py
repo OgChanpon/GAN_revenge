@@ -1,4 +1,4 @@
-# train_gan_optuna.py
+# train_gan_optuna.py (G-step追加版)
 
 import torch
 import torch.nn as nn
@@ -11,15 +11,15 @@ import optuna
 from optuna.trial import TrialState
 
 # 必要なモジュール
-from models import Generator, Discriminator
+from models import Generator, Discriminator, SEBlock # CNN版を使うのでSEBlockも必要ならimport
 from data_preprocessing import prepare_data_loaders
 
 # --- 設定 ---
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 BATCH_SIZE = 64
 MAX_SEQUENCE_LENGTH = 1000
-N_TRIALS = 50       # 試行回数 (時間があれば100回推奨)
-EPOCHS_PER_TRIAL = 20 # 1回の試行で回すエポック数 (短めにして見込みを見る)
+N_TRIALS = 50       # 試行回数
+EPOCHS_PER_TRIAL = 20 
 
 # 辞書ロード
 with open("word_to_int.pkl", "rb") as f:
@@ -34,14 +34,14 @@ NUM_CLASSES = len(category_to_id)
 with open("test_dataset.pkl", "rb") as f:
     test_data = pickle.load(f)
 
-# データローダー (毎回作り直すと重いので外で作っておく)
+# データローダー
 train_loader, _ = prepare_data_loaders(
     batch_size=BATCH_SIZE, 
     max_length=MAX_SEQUENCE_LENGTH,
     validation_split=0.0
 )
 
-# --- 評価関数 (テストデータでの精度) ---
+# --- 評価関数 ---
 def evaluate_model(model):
     model.eval()
     correct = 0
@@ -56,32 +56,32 @@ def evaluate_model(model):
             total += 1
     return correct / total
 
-# --- 目的関数 (Optunaが最適化するもの) ---
+# --- 目的関数 ---
 def objective(trial):
     # ==========================
     # 1. パラメータの探索空間定義
     # ==========================
     
     # モデル構造
-    embedding_dim = trial.suggest_categorical("embedding_dim", [64, 128, 256])
-    hidden_dim = trial.suggest_categorical("hidden_dim", [128, 256, 512])
-    noise_dim = trial.suggest_categorical("noise_dim", [100]) # 固定でもOK
+    embedding_dim = trial.suggest_categorical("embedding_dim", [64, 128, 256, 512, 1024]) # 64は除外して大きめで勝負
+    hidden_dim = trial.suggest_categorical("hidden_dim", [64, 128, 256, 512, 1024])       # CNNフィルタ数
+    noise_dim = 100
     
-    # 学習率 (対数スケールで探索)
+    # 学習率
     lr_d = trial.suggest_float("lr_d", 1e-5, 1e-3, log=True)
-    
-    # Generatorの学習率は、Discriminatorに対する比率で決める
-    # (例: 0.1ならDの1/10、1.0なら同等)
-    g_lr_ratio = trial.suggest_float("g_lr_ratio", 0.1, 1.0)
+    g_lr_ratio = trial.suggest_float("g_lr_ratio", 0.1, 1.5) # 範囲を少し広げる
     lr_g = lr_d * g_lr_ratio
     
-    # その他
-    k_steps = trial.suggest_int("k_steps", 1, 3) # Dを何回更新するか
-    label_real = trial.suggest_float("label_real", 0.8, 1.0)
+    # 更新回数のバランス
+    k_steps = trial.suggest_int("k_steps", 1, 5) # Dを何回更新したらGの番になるか
+    g_steps = trial.suggest_int("g_steps", 1, 5) # ★追加: Gの番が来たら何回連続で更新するか
+    
+    # ラベルスムージング
+    label_real = trial.suggest_float("label_real", 0.85, 1.0)
     label_fake = trial.suggest_float("label_fake", 0.0, 0.2)
     
     # ==========================
-    # 2. モデル構築 & 学習
+    # 2. モデル構築
     # ==========================
     generator = Generator(VOCAB_SIZE, hidden_dim, noise_dim, NUM_CLASSES, MAX_SEQUENCE_LENGTH).to(device)
     discriminator = Discriminator(VOCAB_SIZE, embedding_dim, hidden_dim, NUM_CLASSES).to(device)
@@ -92,6 +92,9 @@ def objective(trial):
     adversarial_loss = nn.BCEWithLogitsLoss()
     auxiliary_loss = nn.CrossEntropyLoss()
     
+    # ==========================
+    # 3. 学習ループ
+    # ==========================
     for epoch in range(EPOCHS_PER_TRIAL):
         discriminator.train()
         generator.train()
@@ -104,7 +107,9 @@ def objective(trial):
             valid = torch.full((batch_len, 1), label_real, device=device)
             fake = torch.full((batch_len, 1), label_fake, device=device)
             
-            # --- Train D ---
+            # ---------------------
+            #  Train Discriminator
+            # ---------------------
             optimizer_d.zero_grad()
             
             # Real
@@ -123,54 +128,49 @@ def objective(trial):
             d_loss.backward()
             optimizer_d.step()
             
-            # --- Train G (K回に1回) ---
+            # ---------------------
+            #  Train Generator (K回に1回、まとめてG回更新)
+            # ---------------------
             if i % k_steps == 0:
-                optimizer_g.zero_grad()
-                z = torch.randn(batch_len, MAX_SEQUENCE_LENGTH, noise_dim).to(device)
-                gen_labels = torch.randint(0, NUM_CLASSES, (batch_len,), device=device)
-                
-                # Soft Embedding Trick
-                fake_logits = generator(z, gen_labels)
-                fake_probs = F.softmax(fake_logits, dim=2)
-                soft_input = torch.matmul(fake_probs, discriminator.embedding.weight)
-                
-                pred_validity, pred_class = discriminator(None, soft_input=soft_input)
-                
-                # Gの目標: Dを騙す(1.0)
-                valid_target = torch.full((batch_len, 1), 1.0, device=device)
-                g_loss = adversarial_loss(pred_validity, valid_target) + auxiliary_loss(pred_class, gen_labels)
-                g_loss.backward()
-                optimizer_g.step()
+                for _ in range(g_steps): # ★ここがポイント: Gを連続更新
+                    optimizer_g.zero_grad()
+                    
+                    # 毎回新しいノイズで生成する
+                    z = torch.randn(batch_len, MAX_SEQUENCE_LENGTH, noise_dim).to(device)
+                    gen_labels = torch.randint(0, NUM_CLASSES, (batch_len,), device=device)
+                    
+                    # Soft Embedding Trick
+                    fake_logits = generator(z, gen_labels)
+                    fake_probs = F.softmax(fake_logits, dim=2)
+                    soft_input = torch.matmul(fake_probs, discriminator.embedding.weight)
+                    
+                    pred_validity, pred_class = discriminator(None, soft_input=soft_input)
+                    
+                    # Gの目標: Dを騙す(1.0)
+                    valid_target = torch.full((batch_len, 1), 1.0, device=device)
+                    g_loss = adversarial_loss(pred_validity, valid_target) + auxiliary_loss(pred_class, gen_labels)
+                    
+                    g_loss.backward()
+                    optimizer_g.step()
 
-        # --- エポックごとの評価と枝刈り ---
+        # --- 評価と枝刈り ---
         accuracy = evaluate_model(discriminator)
-        
-        # Optunaに報告
         trial.report(accuracy, epoch)
-        
-        # 見込みがないなら打ち切る (Pruning)
         if trial.should_prune():
             raise optuna.exceptions.TrialPruned()
 
     return accuracy
 
-# --- メイン処理 ---
 if __name__ == "__main__":
     print(f"Optunaによる最適化を開始します (試行回数: {N_TRIALS})")
-    
-    # 探索の設定 (最大化を目指す)
     study = optuna.create_study(direction="maximize", pruner=optuna.pruners.MedianPruner())
     study.optimize(objective, n_trials=N_TRIALS)
     
     print("\n==================================")
-    print("最適化完了！")
-    print("==================================")
     print(f"Best Trial Accuracy: {study.best_value:.4f}")
     print("Best Params:")
     for key, value in study.best_params.items():
         print(f"  {key}: {value}")
-        
-    # 結果の保存
-    df = study.trials_dataframe()
-    df.to_csv("optuna_results.csv")
+    
+    study.trials_dataframe().to_csv("optuna_results.csv")
     print("結果を optuna_results.csv に保存しました。")
