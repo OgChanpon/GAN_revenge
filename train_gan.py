@@ -89,7 +89,9 @@ adversarial_loss = nn.BCEWithLogitsLoss()
 
 # ★ 損失関数を変更: CrossEntropy -> FocalLoss
 print("Loss Function: Focal Loss (gamma=2.0) を使用します")
-auxiliary_loss = FocalLoss(gamma=2.0).to(device)
+#auxiliary_loss = FocalLoss(gamma=2.0).to(device)
+print("Loss Function: CrossEntropyLoss (Standard) を使用します")
+auxiliary_loss = nn.CrossEntropyLoss()
 
 # --- 5. 学習ループ ---
 print(f"\n--- AC-GAN 最終決戦 (Focal Loss ver.) 開始 ---")
