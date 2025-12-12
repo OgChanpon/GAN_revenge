@@ -74,7 +74,8 @@ print(f"クラス数: {NUM_CLASSES}")
 train_loader, _ = prepare_data_loaders(
     batch_size=BATCH_SIZE, 
     max_length=MAX_SEQUENCE_LENGTH,
-    validation_split=0.0
+    validation_split=0.0,
+    balance_data=True
 )
 
 # --- 3. モデルの初期化 ---
