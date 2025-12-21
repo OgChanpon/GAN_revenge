@@ -15,10 +15,12 @@ from models import Discriminator
 WORD_TO_INT_PATH = 'word_to_int.pkl'
 CATEGORY_TO_ID_PATH = 'category_to_id.pkl'
 #MODEL_PATH = 'acgan_discriminator.pth'
-MODEL_PATH = 'acgan_discriminator_focal.pth'
+#MODEL_PATH = 'acgan_discriminator_focal.pth'
+#MODEL_PATH = 'acgan_discriminator_finetuned.pth'
+MODEL_PATH = 'acgan_discriminator_best.pth'
 TEST_DATA_PATH = 'test_dataset.pkl'
 
-EMBEDDING_DIM = 1024
+EMBEDDING_DIM = 256
 HIDDEN_DIM = 512
 # AC-GANのDiscriminatorはnum_classesが必要
 with open(CATEGORY_TO_ID_PATH, 'rb') as f:
