@@ -40,11 +40,11 @@ LR = 0.0001
 WEIGHT_DECAY = 1e-4 
 
 # パス設定
-BASE_MODEL_PATH = 'acgan_discriminator_focal.pth' 
+BASE_MODEL_PATH = 'acgan_discriminator_filtered.pth' 
 SAVE_PATH = 'acgan_discriminator_best.pth'
 
 WORD_TO_INT_PATH = 'word_to_int.pkl'
-CATEGORY_TO_ID_PATH = 'category_to_id.pkl'
+CATEGORY_TO_ID_PATH = 'category_to_id_filtered.pkl'
 
 # --- データの準備 ---
 if not os.path.exists(WORD_TO_INT_PATH):

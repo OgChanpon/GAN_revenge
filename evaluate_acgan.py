@@ -13,12 +13,12 @@ from models import Discriminator
 
 # --- 設定 ---
 WORD_TO_INT_PATH = 'word_to_int.pkl'
-CATEGORY_TO_ID_PATH = 'category_to_id.pkl'
+CATEGORY_TO_ID_PATH = 'category_to_id_filtered.pkl'
 #MODEL_PATH = 'acgan_discriminator.pth'
 #MODEL_PATH = 'acgan_discriminator_focal.pth'
 #MODEL_PATH = 'acgan_discriminator_finetuned.pth'
 MODEL_PATH = 'acgan_discriminator_best.pth'
-TEST_DATA_PATH = 'test_dataset.pkl'
+TEST_DATA_PATH = 'test_dataset_filtered.pkl'
 
 EMBEDDING_DIM = 256
 HIDDEN_DIM = 512

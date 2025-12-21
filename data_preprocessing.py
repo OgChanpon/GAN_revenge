@@ -13,7 +13,7 @@ def prepare_data_loaders(batch_size=64, max_length=1000, validation_split=0.1, b
     """
     
     # 1. データの読み込み
-    with open("train_dataset.pkl", "rb") as f:
+    with open("train_dataset_filtered.pkl", "rb") as f:
         train_data = pickle.load(f)
         
     # (シーケンス, ラベル) のリストを分解
