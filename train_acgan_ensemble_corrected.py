@@ -42,7 +42,7 @@ LABEL_FAKE = 0.08
 
 # パス
 WORD_TO_INT_PATH = 'word_to_int.pkl'
-CATEGORY_TO_ID_PATH = 'category_to_id_filtered.pkl' # フィルタ済み
+CATEGORY_TO_ID_PATH = 'category_to_id_filtered_full.pkl' # フィルタ済み
 EMBEDDING_DIM = 256
 HIDDEN_DIM = 512
 NOISE_DIM = 100
@@ -151,7 +151,7 @@ for model_idx in range(NUM_MODELS):
             print(f"  Epoch {epoch+1}/{NUM_EPOCHS} done.")
 
     # 保存
-    save_name = f"acgan_ensemble_discriminator_{model_idx}.pth"
+    save_name = f"acgan_ensemble_discriminator_full_{model_idx}.pth"
     torch.save(discriminator.state_dict(), save_name)
     print(f"  Saved: {save_name}")
 

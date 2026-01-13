@@ -37,7 +37,7 @@ NUM_EPOCHS = 30
 NUM_MODELS = 5
 
 WORD_TO_INT_PATH = 'word_to_int.pkl'
-CATEGORY_TO_ID_PATH = 'category_to_id_filtered.pkl'
+CATEGORY_TO_ID_PATH = 'category_to_id_filtered_full.pkl'
 
 # --- データ準備 ---
 if not os.path.exists(WORD_TO_INT_PATH):
@@ -65,8 +65,8 @@ class_weights_tensor /= class_weights_tensor.mean()
 print(f"\n=== Fine-tuning 5 Ensemble Models ===")
 
 for i in range(NUM_MODELS):
-    load_path = f"acgan_ensemble_discriminator_{i}.pth"
-    save_path = f"finetuned_ensemble_{i}.pth"
+    load_path = f"acgan_ensemble_discriminator_full_{i}.pth"
+    save_path = f"finetuned_ensemble_full_{i}.pth"
     
     if not os.path.exists(load_path):
         print(f"Skipping {load_path} (Not found)")

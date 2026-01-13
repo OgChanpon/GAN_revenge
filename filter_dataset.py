@@ -3,16 +3,16 @@ import pickle
 import os
 
 # --- 除外したいクラス名を設定 ---
-EXCLUDE_CLASSES = ['Trojan', 'Spyware', 'Dropper', 'Backdoor']
+EXCLUDE_CLASSES = []
 
 # ファイルパス
 TRAIN_PKL = 'train_dataset.pkl'
 TEST_PKL = 'test_dataset.pkl'
 CAT_PKL = 'category_to_id.pkl'
 
-NEW_TRAIN_PKL = 'train_dataset_filtered.pkl'
-NEW_TEST_PKL = 'test_dataset_filtered.pkl'
-NEW_CAT_PKL = 'category_to_id_filtered.pkl'
+NEW_TRAIN_PKL = 'train_dataset_filtered_full.pkl'
+NEW_TEST_PKL = 'test_dataset_filtered_full.pkl'
+NEW_CAT_PKL = 'category_to_id_filtered_full.pkl'
 
 def filter_and_save():
     if not os.path.exists(TRAIN_PKL) or not os.path.exists(CAT_PKL):
